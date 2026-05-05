@@ -56,8 +56,11 @@ else
     # 5. Set up QMD collection
     echo ""
     echo "🔍 Setting up QMD collection..."
+    # Note: qmd collection add has a path derivation bug, so we patch the DB directly
     qmd collection remove grocery-receipts 2>/dev/null || true
     qmd collection add grocery-receipts "$DATA_DIR/receipts" --pattern '*.md'
+    QMD_DB=$(sqlite3 /Users/bot/.cache/qmd/index.sqlite ".databases" 2>/dev/null | grep -o '[^ ]*index.sqlite' || echo "$HOME/.cache/qmd/index.sqlite")
+    sqlite3 "$QMD_DB" "UPDATE store_collections SET path = '$DATA_DIR/receipts' WHERE name = 'grocery-receipts';" 2>/dev/null || true
     qmd update -c grocery-receipts
     echo "✅ QMD collection created"
 fi
