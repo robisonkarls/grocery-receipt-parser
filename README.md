@@ -90,9 +90,9 @@ bin\parse-receipt.bat photo.jpg
 ### Search receipts (requires QMD)
 
 ```bash
-qmd query "organic strawberries" -c grocery-receipts
-qmd query "what did I buy at Costco last month?" -c grocery-receipts
-qmd query "expensive cheese" -c grocery-receipts
+qmd query "organic strawberries" -c receipts
+qmd query "what did I buy at Costco last month?" -c receipts
+qmd query "expensive cheese" -c receipts
 ```
 
 ### Analytics (SQLite)

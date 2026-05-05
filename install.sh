@@ -109,7 +109,7 @@ else
             "UPDATE store_collections SET path = '$DATA_DIR/receipts' WHERE name = 'grocery-receipts';" \
             2>/dev/null || true
         echo "✅ QMD collection path set to: $DATA_DIR/receipts"
-        qmd update -c grocery-receipts 2>/dev/null || true
+        qmd update -c receipts 2>/dev/null || true
     else
         echo "⚠️  QMD index not found at: $QMD_DB"
     fi

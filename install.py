@@ -113,49 +113,39 @@ def check_dependencies():
     return missing
 
 def setup_qmd():
-    """Set up QMD collection for semantic search."""
+    """Set up QMD collection for semantic search.
+
+    Strategy: cd into DATA_DIR and name the collection 'receipts'.
+    QMD derives the path as cwd+name = DATA_DIR/receipts — always correct,
+    no SQLite patching needed, works on any OS.
+    """
     if not cmd_exists('qmd'):
         print("   ⚠️  QMD not found (optional, enables semantic search)")
         print("      Install: https://github.com/tobilu/qmd")
         return
 
     print("   ✅ QMD found")
-    receipts_dir = str(DATA_DIR / 'receipts')
 
-    # Remove existing collection
+    # Remove old collection (any name) cleanly
+    subprocess.run(['qmd', 'collection', 'remove', 'receipts'],
+                   capture_output=True, cwd=str(DATA_DIR))
     subprocess.run(['qmd', 'collection', 'remove', 'grocery-receipts'],
                    capture_output=True)
 
-    # Add collection
-    subprocess.run(['qmd', 'collection', 'add', 'grocery-receipts',
-                    receipts_dir, '--pattern', '*.md'],
-                   capture_output=True)
+    # Add collection named 'receipts' from DATA_DIR.
+    # QMD derives path as: cwd + name = DATA_DIR/receipts ✅
+    result = subprocess.run(
+        ['qmd', 'collection', 'add', 'receipts', '--pattern', '*.md'],
+        capture_output=True, text=True, cwd=str(DATA_DIR)
+    )
 
-    # Fix path bug: patch QMD's SQLite index directly
-    try:
-        result = subprocess.run(['qmd', '--help'], capture_output=True, text=True)
-        qmd_db = None
-        for line in result.stdout.split('\n'):
-            if line.startswith('Index:'):
-                qmd_db = Path(line.split(':', 1)[1].strip())
-                break
-
-        qmd_db = qmd_db or (Path.home() / '.cache' / 'qmd' / 'index.sqlite')
-
-        if qmd_db.exists():
-            conn = sqlite3.connect(qmd_db)
-            conn.execute(
-                "UPDATE store_collections SET path = ? WHERE name = 'grocery-receipts'",
-                (receipts_dir,)
-            )
-            conn.commit()
-            conn.close()
-            print(f"   ✅ QMD collection path: {receipts_dir}")
-
-            subprocess.run(['qmd', 'update', '-c', 'grocery-receipts'], capture_output=True)
-            print("   ✅ QMD index updated")
-    except Exception as e:
-        print(f"   ⚠️  QMD setup failed: {e}")
+    if result.returncode == 0:
+        print(f"   ✅ QMD collection 'receipts' → {DATA_DIR / 'receipts'}")
+        subprocess.run(['qmd', 'update', '-c', 'receipts'],
+                       capture_output=True, cwd=str(DATA_DIR))
+        print("   ✅ QMD index updated")
+    else:
+        print(f"   ⚠️  QMD collection setup failed: {result.stderr.strip()}")
 
 def print_path_hint():
     bin_dir = REPO_DIR / 'bin'
