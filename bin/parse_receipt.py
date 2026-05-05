@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 """
 parse-receipt — Grocery receipt parser
-Pipeline: OpenCV preprocessing → PaddleOCR → Ollama text parser → Ollama vision fallback
+Supports: JPEG/PNG photos + PDF receipts
+Pipeline: detect type → extract text → Ollama parse → fallback vision → DB + QMD
 
 Usage:
-  python3 parse_receipt.py <image_path>
-  GROCERY_DATA_DIR=/custom/path python3 parse_receipt.py <image_path>
+  python3 parse_receipt.py <image_or_pdf_path>
+  GROCERY_DATA_DIR=/custom/path python3 parse_receipt.py <path>
 """
 
-import os
-import sys
-import json
-import shutil
-import subprocess
-import uuid
+import os, sys, json, shutil, subprocess, uuid
 from pathlib import Path
 from datetime import datetime
 
 REPO_DIR = Path(__file__).parent.parent.resolve()
 SCRIPTS  = REPO_DIR / 'scripts'
+CONF_THRESHOLD = 0.85
 
-# ─── Resolve data directory ────────────────────────────────────────────────────
 def resolve_data_dir():
     if os.environ.get('GROCERY_DATA_DIR'):
         return Path(os.environ['GROCERY_DATA_DIR'])
@@ -36,13 +32,12 @@ DATA_DIR     = resolve_data_dir()
 IMAGES_DIR   = DATA_DIR / 'receipts' / 'images'
 RECEIPTS_DIR = DATA_DIR / 'receipts'
 DB_PATH      = DATA_DIR / 'db' / 'groceries.db'
-CONF_THRESHOLD = 0.85  # Below this → try next method
 
 def ensure_dirs():
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / 'db').mkdir(parents=True, exist_ok=True)
 
-def run_script(script: str, *args) -> dict:
+def run_script(script, *args):
     result = subprocess.run(
         [sys.executable, str(SCRIPTS / script), *args],
         capture_output=True, text=True
@@ -54,149 +49,155 @@ def run_script(script: str, *args) -> dict:
 
 def update_qmd():
     if shutil.which('qmd'):
-        subprocess.run(['qmd', 'update', '-c', 'receipts'],
-                       capture_output=True, cwd=str(DATA_DIR))
-        subprocess.run(['qmd', 'embed', '-c', 'receipts'],
-                       capture_output=True, cwd=str(DATA_DIR))
+        subprocess.run(['qmd', 'update', '-c', 'receipts'], capture_output=True, cwd=str(DATA_DIR))
+        subprocess.run(['qmd', 'embed',  '-c', 'receipts'], capture_output=True, cwd=str(DATA_DIR))
         print("   ✅ QMD index updated")
+
+def parse_text(text, receipt_id):
+    """Try Copilot first (fast), fall back to Ollama (local)."""
+    ocr_json = DATA_DIR / f"{receipt_id}-ocr.json"
+    ocr_json.write_text(json.dumps({'text': text, 'confidence': 1.0}))
+    
+    # Try Copilot first (fast, uses existing auth)
+    result = run_script('parse-copilot.py', str(ocr_json))
+    if result.get('success') and result.get('structured'):
+        return result
+    
+    # Fallback to Ollama (local, slower)
+    print("   ↳ Copilot unavailable, trying Ollama...")
+    return run_script('parse-ollama.py', str(ocr_json))
+
+def vision_fallback(image_path):
+    return run_script('vision-ollama.py', str(image_path), 'llava')
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+        print(__doc__); sys.exit(1)
 
-    image_path = Path(sys.argv[1])
-    if not image_path.exists():
-        print(f"❌ Image not found: {image_path}")
-        sys.exit(1)
+    src = Path(sys.argv[1])
+    if not src.exists():
+        print(f"❌ File not found: {src}"); sys.exit(1)
 
     ensure_dirs()
     receipt_id = f"{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
-    tmp = Path(f'/tmp/{receipt_id}')
-
+    is_pdf = src.suffix.lower() == '.pdf'
     print(f"📸 Receipt ID: {receipt_id}")
-    print(f"   Source: {image_path}")
+    print(f"   Source: {src.name} ({'PDF' if is_pdf else 'Image'})")
 
-    # ── Step 1: Save original image ──────────────────────────────────────────
-    dest_image = IMAGES_DIR / f"{receipt_id}.jpg"
-    shutil.copy2(image_path, dest_image)
-    print(f"   ✅ Image saved")
+    # Save original
+    dest = IMAGES_DIR / f"{receipt_id}{src.suffix}"
+    shutil.copy2(src, dest)
 
-    # ── Step 2: OpenCV preprocessing ─────────────────────────────────────────
-    print("\n🔧 Preprocessing image...")
-    pre_path = str(tmp) + '-pre.jpg'
-    pre_result = run_script('preprocess.py', str(dest_image), pre_path)
-    if pre_result.get('success'):
-        ocr_input = pre_path
-        print(f"   ✅ Preprocessed (deskew: {pre_result.get('deskew_angle', 0)}°)")
-    else:
-        ocr_input = str(dest_image)
-        print(f"   ⚠️  Preprocessing failed, using original")
-
-    # ── Step 3: PaddleOCR ────────────────────────────────────────────────────
-    print("\n🔍 Running PaddleOCR...")
-    ocr_result = run_script('ocr-paddle.py', ocr_input)
-    ocr_conf = ocr_result.get('confidence', 0.0)
-    ocr_text = ocr_result.get('text', '')
-
-    if ocr_result.get('success') and ocr_conf >= CONF_THRESHOLD:
-        print(f"   ✅ Confidence: {ocr_conf:.0%} — good quality")
-        method = 'paddleocr'
-    elif ocr_result.get('success') and ocr_text:
-        print(f"   ⚠️  Confidence: {ocr_conf:.0%} — low, will try LLM parser anyway")
-        method = 'paddleocr-low'
-    else:
-        print(f"   ❌ PaddleOCR failed: {ocr_result.get('error', 'unknown')}")
-        print(f"   ↳ Falling back to vision LLM...")
-        method = 'vision-fallback'
-
-    # ── Step 4: Parse text with Ollama ───────────────────────────────────────
     structured = None
+    method = 'unknown'
+    ocr_text = ''
 
-    if method in ('paddleocr', 'paddleocr-low') and ocr_text.strip():
-        print("\n🧠 Parsing with Ollama (gemma4:e4b)...")
-        ocr_json_path = str(tmp) + '-ocr.json'
-        Path(ocr_json_path).write_text(json.dumps(ocr_result))
-
-        parse_result = run_script('parse-ollama.py', ocr_json_path)
-        if parse_result.get('success') and parse_result.get('structured'):
-            structured = parse_result['structured']
-            items_count = len(structured.get('items', []))
-            # If we got 0 items or no store, OCR text was too garbled — use vision
-            if items_count == 0 or not structured.get('store'):
-                print(f"   ⚠️  0 items extracted — OCR text too garbled, switching to vision fallback")
-                method = 'vision-fallback'
+    # ── PDF: extract text directly (confidence = 1.0) ────────────────────────
+    if is_pdf:
+        print("\n📄 Extracting PDF text...")
+        result = run_script('extract-pdf.py', str(src))
+        if result.get('success'):
+            ocr_text = result['text']
+            print(f"   ✅ {len(ocr_text)} chars extracted")
+            print("\n🧠 Parsing with Ollama (gemma4:e4b)...")
+            parse = parse_text(ocr_text, receipt_id)
+            if parse.get('success') and parse.get('structured'):
+                structured = parse['structured']
+                method = 'pdf+ollama'
+                print(f"   ✅ {len(structured.get('items',[]))} items found")
             else:
-                method = "paddleocr+ollama"
-                print(f"   ✅ Parsed successfully")
-                print(f"   📦 Items found: {items_count}")
+                print(f"   ❌ {parse.get('error','unknown')}")
         else:
-            print(f"   ❌ Ollama parsing failed: {parse_result.get('error', 'unknown')}")
-            print(f"   ↳ Falling back to vision LLM...")
-            method = 'vision-fallback'
+            print(f"   ❌ {result.get('error')}")
 
-    # ── Step 5: Vision LLM fallback ──────────────────────────────────────────
-    if method == 'vision-fallback' or structured is None:
-        print("\n👁️  Running vision fallback (Ollama llava)...")
-        vision_result = run_script('vision-ollama.py', str(dest_image))
-        if vision_result.get('success') and vision_result.get('structured'):
-            structured = vision_result['structured']
-            method = 'ollama-vision'
-            print(f"   ✅ Vision extraction succeeded")
-            items_count = len(structured.get('items', []))
-            print(f"   📦 Items found: {items_count}")
-        else:
-            print(f"   ❌ Vision fallback failed: {vision_result.get('error', 'unknown')}")
-            print(f"\n⚠️  All extraction methods failed. Raw OCR text saved for manual review.")
-            print(f"   OCR text:\n{ocr_text[:500]}")
-            sys.exit(1)
+    # ── Image: preprocess → PaddleOCR → Ollama parse ─────────────────────────
+    else:
+        print("\n🔧 Preprocessing image...")
+        pre = DATA_DIR / f"{receipt_id}-pre.jpg"
+        pre_result = run_script('preprocess.py', str(dest), str(pre))
+        ocr_input = str(pre) if pre_result.get('success') else str(dest)
+        print(f"   {'✅' if pre_result.get('success') else '⚠️ '} Preprocessed")
 
-    # ── Step 6: Generate Markdown ─────────────────────────────────────────────
-    print("\n📝 Generating Markdown receipt...")
-    full_data = {
-        'success': True,
-        'method': method,
-        'confidence': ocr_conf,
-        'text': ocr_text,
-        'structured': structured
-    }
-    full_json_path = str(tmp) + '-full.json'
-    Path(full_json_path).write_text(json.dumps(full_data, indent=2))
+        print("\n🔍 Running PaddleOCR...")
+        ocr = run_script('ocr-paddle.py', ocr_input)
+        ocr_conf = ocr.get('confidence', 0.0)
+        ocr_text = ocr.get('text', '')
+        print(f"   📊 Confidence: {ocr_conf:.0%}")
 
-    md_result = subprocess.run(
-        [sys.executable, str(SCRIPTS / 'generate-markdown.py'), full_json_path],
-        capture_output=True, text=True
-    )
-    if md_result.returncode == 0:
+        if ocr.get('success') and ocr_text.strip():
+            print("\n🧠 Parsing with Ollama (gemma4:e4b)...")
+            parse = parse_text(ocr_text, receipt_id)
+            if parse.get('success') and parse.get('structured'):
+                s = parse['structured']
+                if s.get('items') and s.get('store'):
+                    structured = s
+                    method = 'paddleocr+ollama'
+                    print(f"   ✅ {len(s.get('items',[]))} items found")
+                else:
+                    print(f"   ⚠️  0 items or no store — switching to vision fallback")
+
+        if not structured:
+            print("\n👁️  Running vision fallback (llava)...")
+            vis = vision_fallback(dest)
+            if vis.get('success') and vis.get('structured'):
+                structured = vis['structured']
+                method = 'vision-llava'
+                print(f"   ✅ {len(structured.get('items',[]))} items found")
+            else:
+                print(f"   ❌ {vis.get('error','unknown')}")
+                print("\n⚠️  All methods failed. Send a clearer photo.")
+                sys.exit(1)
+
+    if not structured:
+        print("\n⚠️  Could not extract data."); sys.exit(1)
+
+    # ── Generate Markdown ─────────────────────────────────────────────────────
+    print("\n📝 Generating Markdown...")
+    full = {'success': True, 'method': method, 'confidence': 1.0,
+            'text': ocr_text, 'structured': structured}
+    full_json = DATA_DIR / f"{receipt_id}-full.json"
+    full_json.write_text(json.dumps(full, indent=2))
+
+    md = subprocess.run([sys.executable, str(SCRIPTS / 'generate-markdown.py'), str(full_json)],
+                        capture_output=True, text=True)
+    if md.returncode == 0:
         md_path = RECEIPTS_DIR / f"{receipt_id}.md"
-        md_path.write_text(md_result.stdout)
+        md_path.write_text(md.stdout)
         print(f"   ✅ {md_path.name}")
     else:
-        print(f"   ⚠️  Markdown generation failed: {md_result.stderr[:200]}")
+        print(f"   ⚠️  {md.stderr[:100]}")
 
-    # ── Step 7: Insert into SQLite ────────────────────────────────────────────
+    # ── Insert into SQLite ────────────────────────────────────────────────────
     print("\n🗄️  Saving to database...")
-    db_result = run_script('db-insert.py', receipt_id, full_json_path, str(dest_image))
-    if db_result.get('success'):
-        print(f"   ✅ {db_result.get('items_inserted', 0)} items inserted")
+    db = run_script('db-insert.py', receipt_id, str(full_json), str(dest))
+    if db.get('success'):
+        print(f"   ✅ {db.get('items_inserted',0)} items inserted")
     else:
-        print(f"   ⚠️  DB insert failed: {db_result.get('error', 'unknown')}")
+        print(f"   ⚠️  {db.get('error','unknown')}")
 
-    # ── Step 8: Update QMD ───────────────────────────────────────────────────
+    # ── Update QMD ───────────────────────────────────────────────────────────
     print("\n🔍 Updating QMD index...")
     update_qmd()
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Summary ──────────────────────────────────────────────────────────────
+    items = structured.get('items', [])
     print(f"""
-✅ Receipt parsed successfully!
+✅ Receipt parsed!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏪  Store:   {structured.get('store', 'Unknown')}
-📅  Date:    {structured.get('date', 'Unknown')}
-💰  Total:   ${structured.get('total', 0):.2f}
-📦  Items:   {len(structured.get('items', []))}
-🔬  Method:  {method}
-📄  ID:      {receipt_id}
-""")
+🏪  Store:    {structured.get('store','Unknown')}
+📍  Location: {structured.get('location') or '—'}
+📅  Date:     {structured.get('date','Unknown')}  {structured.get('time','') or ''}
+💰  Total:    ${structured.get('total') or 0:.2f}
+🧾  Tax:      ${structured.get('tax') or 0:.2f}
+📦  Items:    {len(items)}
+💳  Payment:  {structured.get('payment_method') or '—'}
+🔬  Method:   {method}
+🆔  ID:       {receipt_id}
+
+Items:""")
+    for item in items:
+        disc = " 🏷️" if item.get('price', 0) < 0 else ""
+        print(f"  {'➖' if item.get('price',0) < 0 else '•'} {item['name']:30s} ${item['price']:.2f}{disc}")
 
 if __name__ == '__main__':
     main()
