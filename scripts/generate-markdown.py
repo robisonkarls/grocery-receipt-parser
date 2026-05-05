@@ -16,7 +16,7 @@ def generate_markdown(data):
     structured = data.get('structured', {})
     
     # Extract metadata
-    store = structured.get('store', 'Unknown Store')
+    store = structured.get('store') or 'Unknown Store'
     location = structured.get('location', '')
     date = structured.get('date', datetime.now().strftime('%Y-%m-%d'))
     time = structured.get('time', '')

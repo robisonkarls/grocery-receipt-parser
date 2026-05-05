@@ -48,7 +48,7 @@ def insert_receipt(data, receipt_id, image_path):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             receipt_id,
-            structured.get('store', 'Unknown'),
+            structured.get('store') or 'Unknown',
             structured.get('location', ''),
             structured.get('date'),
             structured.get('time', ''),

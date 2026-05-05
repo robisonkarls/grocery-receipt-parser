@@ -36,7 +36,7 @@ DATA_DIR     = resolve_data_dir()
 IMAGES_DIR   = DATA_DIR / 'receipts' / 'images'
 RECEIPTS_DIR = DATA_DIR / 'receipts'
 DB_PATH      = DATA_DIR / 'db' / 'groceries.db'
-CONF_THRESHOLD = 0.80  # Below this → try next method
+CONF_THRESHOLD = 0.85  # Below this → try next method
 
 def ensure_dirs():
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -121,10 +121,15 @@ def main():
         parse_result = run_script('parse-ollama.py', ocr_json_path)
         if parse_result.get('success') and parse_result.get('structured'):
             structured = parse_result['structured']
-            method = f"paddleocr+ollama"
-            print(f"   ✅ Parsed successfully")
             items_count = len(structured.get('items', []))
-            print(f"   📦 Items found: {items_count}")
+            # If we got 0 items or no store, OCR text was too garbled — use vision
+            if items_count == 0 or not structured.get('store'):
+                print(f"   ⚠️  0 items extracted — OCR text too garbled, switching to vision fallback")
+                method = 'vision-fallback'
+            else:
+                method = "paddleocr+ollama"
+                print(f"   ✅ Parsed successfully")
+                print(f"   📦 Items found: {items_count}")
         else:
             print(f"   ❌ Ollama parsing failed: {parse_result.get('error', 'unknown')}")
             print(f"   ↳ Falling back to vision LLM...")

@@ -64,13 +64,18 @@ def run_vision(image_path: str, model: str = DEFAULT_VISION_MODEL) -> dict:
             raw_response = result.get('response', '').strip()
 
             # Strip markdown code blocks if present
-            if raw_response.startswith('```'):
-                raw_response = raw_response.split('```')[1]
-                if raw_response.startswith('json'):
-                    raw_response = raw_response[4:]
-            raw_response = raw_response.strip()
+            import re
+            # Find JSON object in response (handles ```json ... ``` and plain JSON)
+            json_match = re.search(r'\{[\s\S]*\}', raw_response)
+            if not json_match:
+                raise json.JSONDecodeError("No JSON object found", raw_response, 0)
+            raw_response = json_match.group(0).strip()
 
             structured = json.loads(raw_response)
+            
+            # Reject empty/template responses (llava echoing back the template)
+            if not structured.get('store') and not structured.get('items'):
+                raise json.JSONDecodeError("Empty response - image quality too low", raw_response, 0)
             return {
                 'success': True,
                 'method': 'ollama-vision',
