@@ -2,7 +2,9 @@
 
 **Parse grocery receipts into searchable, structured data.**
 
-Hybrid OCR + Vision LLM pipeline that extracts receipt data and stores it for semantic search and analytics.
+Hybrid OCR + Vision LLM pipeline that extracts receipt data and stores it for semantic search and analytics. Works on **macOS, Linux, and Windows**.
+
+---
 
 ## Features
 
@@ -11,176 +13,160 @@ Hybrid OCR + Vision LLM pipeline that extracts receipt data and stores it for se
 - 🗄️ **SQLite analytics** — Spending totals, price trends, purchase predictions
 - 🔍 **Semantic search** — Natural language queries via QMD
 - 🤖 **OpenClaw integration** — Parse receipts from Telegram/Discord/Slack
+- 🌍 **Cross-platform** — macOS, Linux, Windows
+
+---
+
+## Requirements
+
+- Python 3.8+
+- Tesseract OCR
+- ImageMagick (optional, improves OCR quality)
+- QMD (optional, enables semantic search)
 
 ---
 
 ## Installation
 
-### Prerequisites
+### 1. Clone
 
 ```bash
-# macOS
-brew install tesseract imagemagick sqlite3
-
-# Optional: EasyOCR for better accuracy
-pip3 install easyocr
-```
-
-### Install
-
-```bash
-git clone https://github.com/robison/grocery-receipt-parser
+git clone https://github.com/robisonkarls/grocery-receipt-parser
 cd grocery-receipt-parser
-./install.sh
 ```
 
-This creates `~/.grocery-receipts/` for your receipt data.
+### 2. Install dependencies
+
+**macOS**
+```bash
+brew install tesseract imagemagick
+```
+
+**Ubuntu/Debian**
+```bash
+sudo apt-get install tesseract-ocr imagemagick python3
+```
+
+**Windows**
+```powershell
+winget install tesseract    # or: choco install tesseract
+winget install imagemagick  # or: choco install imagemagick
+```
+
+### 3. Run installer
+
+```bash
+python3 install.py
+```
+
+**Custom data directory:**
+```bash
+GROCERY_DATA_DIR=/external/drive python3 install.py         # macOS/Linux
+set GROCERY_DATA_DIR=D:\MyData && python3 install.py        # Windows
+```
+
+This creates your data directory (default: `~/.grocery-receipts`) and saves the path to `config.json` so you don't need to set the env var again.
 
 ---
 
 ## Usage
 
-### Standalone CLI
+### Parse a receipt
 
 ```bash
-# Parse a receipt
-parse-receipt photo.jpg
+# macOS/Linux
+python3 bin/parse_receipt.py photo.jpg
 
-# Search receipts (requires QMD)
-grocery-search "organic strawberries"
-grocery-search "what did I buy at Costco last month?"
+# Windows
+python bin\parse_receipt.py photo.jpg
 
-# Analytics (SQLite queries)
-sqlite3 ~/.grocery-receipts/db/groceries.db "SELECT SUM(total_amount) FROM receipts WHERE strftime('%Y-%m', receipt_date) = '2026-05'"
+# Or via shell launcher (macOS/Linux)
+bin/parse-receipt photo.jpg
+
+# Or via Windows launcher
+bin\parse-receipt.bat photo.jpg
 ```
 
-### With OpenClaw
-
-Add this repo as an OpenClaw skill:
+### Search receipts (requires QMD)
 
 ```bash
-cd ~/.openclaw/agents/<your-agent>/workspace
-ln -s ~/projects/grocery-receipt-parser SKILL-grocery-receipt-parser
+qmd query "organic strawberries" -c grocery-receipts
+qmd query "what did I buy at Costco last month?" -c grocery-receipts
+qmd query "expensive cheese" -c grocery-receipts
 ```
 
-Then in Telegram/Discord/Slack:
+### Analytics (SQLite)
+
+```bash
+sqlite3 ~/.grocery-receipts/db/groceries.db \
+  "SELECT store_name, receipt_date, total_amount FROM receipts ORDER BY receipt_date DESC;"
+```
+
+### With OpenClaw (Telegram/Discord/Slack)
 
 ```
 📷 *send receipt photo*
-/parse-receipt
+"parse this receipt"
 
-🔍 /grocery-search organic fruit
-📊 /grocery-stats costco spending may
+/grocery-search organic fruit
+/grocery-stats costco may spending
+```
+
+---
+
+## Data layout
+
+```
+~/.grocery-receipts/          ← default, or GROCERY_DATA_DIR
+├── config.json               ← set by installer
+├── receipts/
+│   ├── images/               ← original photos
+│   └── *.md                  ← structured Markdown (QMD-indexed)
+└── db/
+    └── groceries.db          ← SQLite for analytics
 ```
 
 ---
 
 ## Architecture
 
-### Hybrid Storage: QMD + SQLite
-
-- **QMD** (Markdown + embeddings) for semantic search
-- **SQLite** for structured queries and analytics
-
-### Pipeline
-
 ```
 Receipt Photo
     ↓
-Tesseract OCR (fast, free)
-    ↓ (if confidence < 0.7)
-EasyOCR (better quality)
-    ↓ (if confidence < 0.7)
-Claude Vision (handles messy receipts)
+Tesseract OCR (fast, free, local)
+    ↓ (confidence < 70%)
+EasyOCR (better on warped images)       [TODO]
+    ↓ (confidence < 70%)
+Claude Vision (handles anything)        [TODO]
     ↓
 Structured JSON
     ↓
-├─→ Markdown file (~/.grocery-receipts/receipts/*.md)
-└─→ SQLite database (~/.grocery-receipts/db/groceries.db)
-    ↓
-QMD indexing (semantic search)
-```
-
-### Data Layout
-
-```
-~/.grocery-receipts/
-├── receipts/
-│   ├── images/           # Original photos
-│   └── *.md              # Markdown receipts (QMD-indexed)
-├── db/
-│   └── groceries.db      # SQLite for analytics
-└── config.json           # User config (optional)
-```
-
----
-
-## Semantic Search Examples
-
-```bash
-# What fruit did I buy last month?
-grocery-search "fruit purchases april 2026"
-
-# Find that expensive cheese
-grocery-search "expensive aged cheddar costco"
-
-# Show all organic products
-grocery-search "organic vegetables dairy eggs"
-```
-
----
-
-## Analytics Examples
-
-```sql
--- Total spending per month
-SELECT 
-  strftime('%Y-%m', receipt_date) as month,
-  SUM(total_amount) as total
-FROM receipts
-GROUP BY month
-ORDER BY month DESC;
-
--- Average price per item category
-SELECT 
-  category,
-  AVG(total_price) as avg_price,
-  COUNT(*) as times_purchased
-FROM items
-WHERE category IS NOT NULL
-GROUP BY category;
-
--- Items due for repurchase
-SELECT 
-  item_name,
-  last_purchase_date,
-  julianday('now') - julianday(last_purchase_date) as days_since
-FROM purchase_patterns
-WHERE days_since > avg_days_between_purchase
-ORDER BY days_since DESC;
+├── Markdown file → QMD semantic search
+└── SQLite row   → analytics + predictions
 ```
 
 ---
 
 ## Roadmap
 
+- [x] Cross-platform installer (Python)
 - [x] Tesseract OCR wrapper
 - [x] Markdown generator
 - [x] SQLite schema + inserter
-- [x] QMD collection setup
+- [x] Purchase pattern tracking
+- [x] QMD semantic search setup
 - [ ] OCR text → structured data parser
 - [ ] EasyOCR fallback
 - [ ] Claude Vision fallback
-- [ ] Main orchestrator script
-- [ ] OpenClaw SKILL.md
-- [ ] Purchase prediction engine
-- [ ] Web UI for manual review
+- [ ] Full end-to-end pipeline
+- [ ] OpenClaw SKILL integration
+- [ ] Purchase prediction alerts
 
 ---
 
 ## Contributing
 
-PRs welcome! This is built for the OpenClaw community.
+PRs welcome. This is built for the OpenClaw community.
 
 ---
 
