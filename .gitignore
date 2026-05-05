@@ -1,0 +1,21 @@
+# User data (keep private)
+receipts/
+db/
+*.db
+*.jpg
+*.jpeg
+*.png
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# macOS
+.DS_Store
+
+# Temp files
+*.tmp
+/tmp/
