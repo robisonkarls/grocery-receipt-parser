@@ -1,119 +1,131 @@
-# Grocery Receipt Parser — OpenClaw Skill
+---
+name: grocery-receipt-parser
+description: >
+  Parse grocery receipts into the database. Triggered when Robison sends
+  a receipt image (JPG, PNG) or PDF document in Telegram. Also triggered
+  by phrases like "parse this receipt", "add to database", "log this receipt",
+  "scan this receipt". Handles Costco, Superstore, Save-On, and any grocery store.
+---
 
-Parse grocery receipts into searchable, structured data via Telegram, Discord, Slack, or any OpenClaw channel.
+# Grocery Receipt Parser Skill
 
-## Installation
+## Trigger Conditions
+
+- User sends a **photo** attachment (receipt image)
+- User sends a **PDF/document** attachment (digital receipt)
+- User says "parse", "scan", "log receipt", "add to database"
+
+## Architecture
+
+The agent does the LLM parsing step (not a subprocess). Scripts handle
+file I/O, OCR, DB, and QMD. This avoids auth issues with external APIs.
+
+## Step-by-Step Workflow
+
+### Step 1 — Find the file
+
+Inbound media lands in `~/.openclaw/media/inbound/`. Find the most recent receipt file:
 
 ```bash
-# 1. Install the tool
-git clone https://github.com/robison/grocery-receipt-parser ~/projects/grocery-receipt-parser
-cd ~/projects/grocery-receipt-parser
-./install.sh
-
-# 2. Link as OpenClaw skill (optional, for slash commands)
-mkdir -p ~/.openclaw/skills
-ln -s ~/projects/grocery-receipt-parser ~/.openclaw/skills/grocery-receipt-parser
+ls -t ~/.openclaw/media/inbound/ | head -10
 ```
 
-## Usage
+Match by extension: `.pdf`, `.jpg`, `.jpeg`, `.png`
 
-### Parse Receipt
+### Step 2 — Extract text
 
-**Send a photo in Telegram/Discord/Slack:**
-
+**For PDF:**
+```bash
+python3 ~/projects/grocery-receipt-parser/scripts/extract-pdf.py <path>
 ```
-📷 *attach receipt photo*
-"Parse this receipt"
+Returns `{"success": true, "text": "...", "confidence": 1.0}`
+
+**For image:**
+```bash
+# Preprocess
+python3 ~/projects/grocery-receipt-parser/scripts/preprocess.py <path> /tmp/pre.jpg
+# OCR
+python3 ~/projects/grocery-receipt-parser/scripts/ocr-paddle.py /tmp/pre.jpg
 ```
+Returns `{"success": true, "text": "...", "confidence": 0.xx, "lines": [...]}`
 
-**Agent behavior**:
-1. Save photo to `~/.grocery-receipts/receipts/images/`
-2. Run Tesseract OCR
-3. If confidence < 0.7 → fallback to EasyOCR
-4. If confidence < 0.7 → fallback to Claude Vision
-5. Extract structured data (store, date, items, total)
-6. Generate Markdown receipt
-7. Insert into SQLite database
-8. Update QMD index
-9. Reply with summary
+### Step 3 — Parse text into structured JSON (AGENT does this)
 
-### Search Receipts
+Use your own intelligence to parse the extracted text. Do NOT call a subprocess.
 
-**Natural language queries:**
-
-```
-/grocery-search organic strawberries
-/grocery-search what did I buy at Costco last month
-/grocery-search expensive cheese
-```
-
-Uses QMD semantic search on indexed receipt Markdown files.
-
-### Analytics
-
-```
-/grocery-stats costco spending may
-/grocery-stats average price per category
-/grocery-stats items due for repurchase
-```
-
-Runs SQLite queries on structured receipt data.
-
-## Agent Implementation
-
-When the agent receives a photo message with "parse" intent:
-
-```python
-# Example OpenClaw agent pseudo-code
-if message.has_photo and "parse" in message.text.lower():
-    photo_path = save_attachment(message.photo)
-    result = exec("parse-receipt", photo_path)
-    reply(f"✅ Receipt parsed!\n{result.summary}")
+Parse the raw text into this schema:
+```json
+{
+  "store": "store name",
+  "location": "city/location",
+  "date": "YYYY-MM-DD",
+  "time": "HH:MM",
+  "items": [
+    {"name": "item name", "price": 0.00, "qty": 1, "category": "produce|dairy|meat|grocery|household|other"}
+  ],
+  "subtotal": 0.00,
+  "tax": 0.00,
+  "total": 0.00,
+  "payment_method": "Visa|Mastercard|Debit|Cash",
+  "transaction_id": "id if present"
+}
 ```
 
-## Commands
+**Costco-specific rules:**
+- Lines with `TPD/` prefix = instant savings/discounts (negative price)
+- `KS` prefix = Kirkland Signature
+- Barcode numbers at start of lines = ignore
+- `2` at end of price line = tax code, not quantity
 
-### `/parse-receipt <photo>`
-Parse a receipt photo (if photo is attached, this is implicit).
+### Step 4 — Save to database + QMD
 
-### `/grocery-search <query>`
-Search receipts with natural language.
+Write structured JSON to a temp file, then run:
 
-### `/grocery-stats <query>`
-Run analytics queries.
+```bash
+RECEIPT_ID="$(date +%Y%m%d)-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:6])')"
+FULL_JSON="/tmp/${RECEIPT_ID}-full.json"
 
-## Data Storage
+# Write JSON (agent constructs this)
+echo '<structured_json>' > "$FULL_JSON"
 
-- **Images**: `~/.grocery-receipts/receipts/images/*.jpg`
-- **Markdown**: `~/.grocery-receipts/receipts/*.md` (QMD-indexed)
-- **Database**: `~/.grocery-receipts/db/groceries.db`
+# Generate markdown
+python3 ~/projects/grocery-receipt-parser/scripts/generate-markdown.py "$FULL_JSON" \
+  > ~/.grocery-receipts/receipts/${RECEIPT_ID}.md
 
-## Requirements
+# Insert into SQLite
+python3 ~/projects/grocery-receipt-parser/scripts/db-insert.py \
+  "$RECEIPT_ID" "$FULL_JSON" "<original_file_path>"
 
-- Tesseract OCR: `brew install tesseract`
-- ImageMagick: `brew install imagemagick`
-- SQLite3: `brew install sqlite3`
-- QMD (optional): For semantic search
-- Claude API (optional): For vision fallback
+# Update QMD
+cd ~/.grocery-receipts && qmd update -c receipts && qmd embed -c receipts
+```
 
-## Privacy
+### Step 5 — Reply to user
 
-All data stays local. No cloud services required (except optional Claude Vision fallback).
+```
+✅ Receipt saved!
 
-## Roadmap
+🏪 {store} — {location}
+📅 {date} {time}
+💰 Total: ${total} (tax ${tax})
+💳 {payment_method}
+📦 {n} items: {item1}, {item2}, ...
+💾 Saved to database + search index
 
-- [x] Tesseract OCR
-- [x] Markdown generation
-- [x] SQLite storage
-- [x] QMD indexing
-- [ ] OCR → structured data parser
-- [ ] EasyOCR fallback
-- [ ] Claude Vision fallback
-- [ ] Purchase prediction alerts
-- [ ] Telegram/Discord native integration
+🔍 Try: qmd query "organic milk" -c receipts
+```
 
-## Contributing
+## Data Paths
 
-This is a community tool. PRs welcome!
+- Data dir: `~/.grocery-receipts/`
+- Images: `~/.grocery-receipts/receipts/images/`
+- Markdown: `~/.grocery-receipts/receipts/*.md`
+- Database: `~/.grocery-receipts/db/groceries.db`
+- QMD collection: `receipts` (collection name, not path)
 
-Repo: https://github.com/robison/grocery-receipt-parser
+## Error Handling
+
+- OCR confidence < 0.7 on image → tell user to send a clearer photo
+- PDF with no text → auto-falls back to OCR via extract-pdf.py
+- DB insert fails → report the error, do not silently fail
+
