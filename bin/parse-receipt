@@ -2,66 +2,77 @@
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA_DIR="$HOME/.grocery-receipts"
+
+# ─── Resolve data directory ────────────────────────────────────────────────────
+# Priority: env var > config.json > default
+if [ -n "$GROCERY_DATA_DIR" ]; then
+    DATA_DIR="$GROCERY_DATA_DIR"
+elif [ -f "$HOME/.grocery-receipts/config.json" ]; then
+    DATA_DIR=$(python3 -c "import json; print(json.load(open('$HOME/.grocery-receipts/config.json'))['dataDir'])" 2>/dev/null || echo "$HOME/.grocery-receipts")
+else
+    DATA_DIR="$HOME/.grocery-receipts"
+fi
+
 RECEIPTS_DIR="$DATA_DIR/receipts"
 IMAGES_DIR="$RECEIPTS_DIR/images"
+DB_PATH="$DATA_DIR/db/groceries.db"
 
-# Usage
+# ─── Usage ─────────────────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
     echo "Usage: parse-receipt <image_path>"
     echo ""
     echo "Parse a grocery receipt image and store the data."
     echo ""
+    echo "Options:"
+    echo "  GROCERY_DATA_DIR=/path  Override data directory"
+    echo ""
     echo "Examples:"
     echo "  parse-receipt photo.jpg"
     echo "  parse-receipt ~/Downloads/costco-receipt.jpg"
+    echo "  GROCERY_DATA_DIR=/external/drive parse-receipt photo.jpg"
     exit 1
 fi
 
 IMAGE_PATH="$1"
 
 if [ ! -f "$IMAGE_PATH" ]; then
-    echo "Error: Image not found: $IMAGE_PATH"
+    echo "❌ Image not found: $IMAGE_PATH"
     exit 1
 fi
 
-# Generate receipt ID
+# ─── Ensure directories exist ──────────────────────────────────────────────────
+mkdir -p "$IMAGES_DIR"
+mkdir -p "$DATA_DIR/db"
+
+# ─── Generate receipt ID ───────────────────────────────────────────────────────
 RECEIPT_ID="$(date +%Y%m%d)-$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -d- -f1)"
 
-echo "📸 Processing receipt..."
+echo "📸 Processing receipt: $RECEIPT_ID"
 
-# 1. Copy image to data directory
+# ─── Save image ────────────────────────────────────────────────────────────────
 cp "$IMAGE_PATH" "$IMAGES_DIR/$RECEIPT_ID.jpg"
-echo "✅ Image saved: $IMAGES_DIR/$RECEIPT_ID.jpg"
+echo "✅ Image saved"
 
-# 2. Preprocess (optional, improve OCR quality)
+# ─── Preprocess ────────────────────────────────────────────────────────────────
 if command -v magick &> /dev/null; then
-    magick "$IMAGES_DIR/$RECEIPT_ID.jpg" -auto-orient -colorspace Gray -contrast-stretch 0 -sharpen 0x1 "/tmp/$RECEIPT_ID-preprocessed.jpg"
-    OCR_IMAGE="/tmp/$RECEIPT_ID-preprocessed.jpg"
+    magick "$IMAGES_DIR/$RECEIPT_ID.jpg" -auto-orient -colorspace Gray -contrast-stretch 0 -sharpen 0x1 "/tmp/$RECEIPT_ID-pre.jpg"
+    OCR_IMAGE="/tmp/$RECEIPT_ID-pre.jpg"
+elif command -v convert &> /dev/null; then
+    convert "$IMAGES_DIR/$RECEIPT_ID.jpg" -auto-orient -colorspace Gray -contrast-stretch 0 "/tmp/$RECEIPT_ID-pre.jpg"
+    OCR_IMAGE="/tmp/$RECEIPT_ID-pre.jpg"
 else
     OCR_IMAGE="$IMAGES_DIR/$RECEIPT_ID.jpg"
 fi
 
-# 3. Run OCR (Tesseract)
+# ─── OCR ───────────────────────────────────────────────────────────────────────
 echo "🔍 Running OCR..."
 python3 "$REPO_DIR/scripts/ocr-tesseract.py" "$OCR_IMAGE" > "/tmp/$RECEIPT_ID-ocr.json"
+CONFIDENCE=$(python3 -c "import json; print(json.load(open('/tmp/$RECEIPT_ID-ocr.json'))['confidence'])")
+echo "📊 Confidence: $CONFIDENCE"
 
-CONFIDENCE=$(jq -r '.confidence' "/tmp/$RECEIPT_ID-ocr.json")
-echo "📊 OCR Confidence: $CONFIDENCE"
+# TODO: EasyOCR fallback (confidence < 0.7)
+# TODO: Claude Vision fallback (confidence < 0.7)
 
-# TODO: Add EasyOCR fallback if confidence < 0.7
-# TODO: Add Claude Vision fallback if confidence < 0.7
-
-# 4. Parse OCR output (TODO: build actual parser)
-# For now, we'll need manual structured data
-if [ "$CONFIDENCE" = "null" ] || [ "$(echo "$CONFIDENCE < 0.7" | bc -l)" = "1" ]; then
-    echo "⚠️  Low OCR confidence. Manual review recommended."
-    echo "    Raw OCR saved to: /tmp/$RECEIPT_ID-ocr.json"
-    echo ""
-    echo "    To continue, create structured JSON at: /tmp/$RECEIPT_ID-structured.json"
-    echo "    Then run: grocery-import $RECEIPT_ID /tmp/$RECEIPT_ID-structured.json"
-    exit 0
-fi
-
-echo "✅ Receipt parsed: $RECEIPT_ID"
-echo "📄 Next: Build parser to extract structured data from OCR"
+echo ""
+echo "⚠️  OCR parser not yet built — raw text saved to: /tmp/$RECEIPT_ID-ocr.json"
+echo "    Run 'cat /tmp/$RECEIPT_ID-ocr.json' to inspect output."
