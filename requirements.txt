@@ -1,0 +1,13 @@
+# Core OCR
+paddlepaddle>=3.3.0
+paddleocr>=3.5.0
+opencv-python-headless>=4.10.0
+
+# PDF handling
+pypdfium2>=4.0.0
+
+# Image processing
+Pillow>=10.0.0
+
+# Optional: faster fuzzy matching for sale event alerts (Phase 2)
+# rapidfuzz>=3.0.0
