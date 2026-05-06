@@ -31,8 +31,8 @@ DISCOUNT_LINE = re.compile(
 PRICE_ONLY    = re.compile(r'^\s*([\d,]+\.\d{2})\s*[2BGHT]?\s*$')
 
 SUBTOTAL_KW   = re.compile(r'\bSUBTOTAL\b', re.I)
-TAX_KW        = re.compile(r'\b(TAX|GST|HST|PST)\b.*?([\d,]+\.\d{2})', re.I)
-TOTAL_KW      = re.compile(r'(?:\*+\s*)?TOTAL\b.*?([\d,]+\.\d{2})', re.I)
+TAX_KW        = re.compile(r'\b(TAX|GST|HST|PST)\b.*?([\d,]+\.\d{2})([-]?)', re.I)
+TOTAL_KW      = re.compile(r'(?:\*+\s*)?TOTAL\b.*?([\d,]+\.\d{2})([-]?)', re.I)
 ITEMS_SOLD_KW = re.compile(r'ITEMS?\s+SOLD\s*[=:]\s*(\d+)', re.I)
 
 PAYMENT_KW    = re.compile(
@@ -81,12 +81,13 @@ def parse_time(text):
     return None
 
 def parse_store(lines):
-    for line in lines[:6]:
+    for line in lines[:8]:
         l = line.strip()
         if re.search(r'COSTCO', l, re.I):
             return 'Costco Wholesale'
+        if re.search(r'#\d{3,}', l):
+            return 'Costco Wholesale'
     return 'Unknown'
-
 def parse_location(lines):
     for line in lines[:6]:
         l = line.strip()
@@ -171,10 +172,13 @@ def parse_grocery(lines, text):
             m = PRICE_PATTERN.search(line)
             if m: subtotal = parse_price(m.group(1))
         tm = TAX_KW.search(line)
-        if tm: tax = parse_price(tm.group(2))
+        if tm:
+            tax = parse_price(tm.group(2))
+            if tm.group(3) == '-': tax = -tax if tax else tax
         tot = TOTAL_KW.search(line)
         if tot and not SUBTOTAL_KW.search(line):
             total = parse_price(tot.group(1))
+            if tot.group(2) == '-': total = -total if total else total
 
     return items, subtotal, tax, total
 
@@ -237,6 +241,7 @@ def parse(text):
 
     # Detect receipt type
     is_fuel = bool(FUEL_SALE_KW.search(text))
+    is_refund = bool(re.search(r'TOTAL.*?[\d.]+\s*-', text) or re.search(r'AMOUNT:\s*\$[\d.]+\s*-', text))
 
     if is_fuel:
         items, subtotal, tax, total = parse_fuel(lines, text)
@@ -251,7 +256,7 @@ def parse(text):
         'success': confidence >= 0.5,
         'method': 'regex',
         'confidence': round(confidence, 2),
-        'receipt_type': 'fuel' if is_fuel else 'grocery',
+        'receipt_type': 'fuel' if is_fuel else ('refund' if is_refund else 'grocery'),
         'structured': {
             'store': store,
             'location': location,
