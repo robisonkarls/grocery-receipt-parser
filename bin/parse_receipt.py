@@ -37,6 +37,13 @@ def ensure_dirs():
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / 'db').mkdir(parents=True, exist_ok=True)
 
+def write_ocr_json(text, receipt_id):
+    """Write OCR text to a temp JSON file for script consumption."""
+    import tempfile
+    path = Path(f'/tmp/{receipt_id}-ocr.json')
+    path.write_text(json.dumps({'text': text, 'confidence': 1.0}))
+    return str(path)
+
 def run_script(script, *args):
     result = subprocess.run(
         [sys.executable, str(SCRIPTS / script), *args],
@@ -99,14 +106,24 @@ def main():
         if result.get('success'):
             ocr_text = result['text']
             print(f"   ✅ {len(ocr_text)} chars extracted")
-            print("\n🧠 Parsing with Ollama (qwen2.5:3b)...")
-            parse = parse_text(ocr_text, receipt_id)
-            if parse.get('success') and parse.get('structured'):
+
+            # Try regex first (fast, no LLM needed)
+            print("\n🔎 Parsing with regex...")
+            parse = run_script('parse-regex.py', str(write_ocr_json(ocr_text, receipt_id)))
+            if parse.get('success') and parse.get('structured', {}).get('total'):
                 structured = parse['structured']
-                method = 'pdf+ollama'
+                method = f"pdf+regex ({parse.get('receipt_type','grocery')})"
                 print(f"   ✅ {len(structured.get('items',[]))} items found")
             else:
-                print(f"   ❌ {parse.get('error','unknown')}")
+                # Fallback to LLM
+                print(f"   ⚠️  Regex incomplete — trying Ollama (qwen2.5:3b)...")
+                parse = parse_text(ocr_text, receipt_id)
+                if parse.get('success') and parse.get('structured'):
+                    structured = parse['structured']
+                    method = 'pdf+ollama'
+                    print(f"   ✅ {len(structured.get('items',[]))} items found")
+                else:
+                    print(f"   ❌ {parse.get('error','unknown')}")
         else:
             print(f"   ❌ {result.get('error')}")
 
