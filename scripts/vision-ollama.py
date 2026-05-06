@@ -13,7 +13,7 @@ import urllib.error
 from pathlib import Path
 
 OLLAMA_URL = 'http://127.0.0.1:11434/api/generate'
-DEFAULT_VISION_MODEL = 'moondream:1.8b'
+DEFAULT_VISION_MODEL = 'qwen2.5vl:7b'
 
 VISION_PROMPT = """Look at this grocery receipt image and extract all the data.
 
@@ -50,7 +50,8 @@ def run_vision(image_path: str, model: str = DEFAULT_VISION_MODEL) -> dict:
         'prompt': VISION_PROMPT,
         'images': [image_b64],
         'stream': False,
-        'options': {'temperature': 0.1}
+        'format': 'json',
+        'options': {'temperature': 0}
     }).encode('utf-8')
 
     try:

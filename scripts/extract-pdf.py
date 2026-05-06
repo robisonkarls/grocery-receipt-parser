@@ -26,7 +26,10 @@ def extract_text_pdf(pdf_path: str) -> dict:
         for page in doc:
             textpage = page.get_textpage()
             pages_text.append(textpage.get_text_range())
+        import re
         text = '\n'.join(pages_text).strip()
+        # Strip markdown artifacts (e.g. **KS TOWEL** → KS TOWEL)
+        text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)
         return {'success': True, 'text': text, 'pages': len(pages_text)}
     except Exception as e:
         return {'success': False, 'error': str(e)}

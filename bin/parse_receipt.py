@@ -99,7 +99,7 @@ def main():
         if result.get('success'):
             ocr_text = result['text']
             print(f"   ✅ {len(ocr_text)} chars extracted")
-            print("\n🧠 Parsing with Ollama (gemma4:e4b)...")
+            print("\n🧠 Parsing with Ollama (qwen2.5:3b)...")
             parse = parse_text(ocr_text, receipt_id)
             if parse.get('success') and parse.get('structured'):
                 structured = parse['structured']
@@ -125,7 +125,7 @@ def main():
         print(f"   📊 Confidence: {ocr_conf:.0%}")
 
         if ocr.get('success') and ocr_text.strip():
-            print("\n🧠 Parsing with Ollama (gemma4:e4b)...")
+            print("\n🧠 Parsing with Ollama (qwen2.5:3b)...")
             parse = parse_text(ocr_text, receipt_id)
             if parse.get('success') and parse.get('structured'):
                 s = parse['structured']

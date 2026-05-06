@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Ollama text parser: feeds raw OCR text to a local LLM and returns structured JSON.
-Uses gemma4:e4b (already installed) by default.
+Ollama text parser: feeds raw OCR/PDF text to a local LLM → structured JSON.
+Uses qwen2.5:3b by default (fast, excellent JSON compliance).
+Uses Ollama native format:"json" to force valid JSON output every time.
 """
 
 import sys
@@ -10,43 +11,40 @@ import urllib.request
 import urllib.error
 
 OLLAMA_URL = 'http://127.0.0.1:11434/api/generate'
-DEFAULT_MODEL = 'gemma4:e4b'
+DEFAULT_MODEL = 'qwen2.5:3b'
+FALLBACK_MODEL = 'llama3.2:1b'
 
-PROMPT_TEMPLATE = """You are a grocery receipt parser. Extract structured data from this receipt text.
+PROMPT_TEMPLATE = """Extract structured data from this grocery receipt text.
 
-Return ONLY valid JSON with this exact schema (no markdown, no explanation):
-{{
-  "store": "store name",
-  "location": "city/location if present",
-  "date": "YYYY-MM-DD",
-  "time": "HH:MM",
-  "items": [
-    {{"name": "item name", "price": 0.00, "qty": 1, "category": "produce|dairy|meat|grocery|household|other"}}
-  ],
-  "subtotal": 0.00,
-  "tax": 0.00,
-  "total": 0.00,
-  "payment_method": "Visa|Cash|Debit|etc",
-  "transaction_id": "id if present"
-}}
+Return a JSON object with these exact fields:
+- store: store name (string)
+- location: city or location (string or null)
+- date: date in YYYY-MM-DD format (string)
+- time: time in HH:MM format (string or null)
+- items: array of items, each with name (string), price (number), qty (number, default 1), category (string: produce/dairy/meat/grocery/household/other)
+- subtotal: subtotal amount (number)
+- tax: tax amount (number)
+- total: total amount (number)
+- payment_method: payment type (string or null)
+- transaction_id: transaction ID (string or null)
 
 Rules:
-- Prices must be numbers (not strings)
-- Date must be YYYY-MM-DD format
-- If a field is unknown, use null
-- Do NOT include any text outside the JSON
+- Lines with TPD/ are instant savings/discounts — include as negative price items
+- KS prefix means Kirkland Signature
+- Barcode numbers at start of lines should be ignored
+- Trailing 2 on price lines is a tax code, not quantity
+- Prices must be numbers not strings
 
 Receipt text:
 {text}"""
 
 def parse_with_ollama(ocr_text: str, model: str = DEFAULT_MODEL) -> dict:
-    prompt = PROMPT_TEMPLATE.format(text=ocr_text)
-
     payload = json.dumps({
         'model': model,
-        'prompt': prompt,
+        'prompt': PROMPT_TEMPLATE.format(text=ocr_text),
         'stream': False,
-        'options': {'temperature': 0.1}  # Low temp for consistent JSON
+        'format': 'json',  # Ollama native JSON mode — forces valid JSON output
+        'options': {'temperature': 0}
     }).encode('utf-8')
 
     try:
@@ -55,50 +53,24 @@ def parse_with_ollama(ocr_text: str, model: str = DEFAULT_MODEL) -> dict:
             data=payload,
             headers={'Content-Type': 'application/json'}
         )
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-            raw_response = result.get('response', '')
+            structured = json.loads(result.get('response', '{}'))
 
-            # Strip markdown code blocks if present
-            raw_response = raw_response.strip()
-            if raw_response.startswith('```'):
-                raw_response = raw_response.split('```')[1]
-                if raw_response.startswith('json'):
-                    raw_response = raw_response[4:]
-            raw_response = raw_response.strip()
+            if not structured.get('store') and not structured.get('items'):
+                return {'success': False, 'method': model,
+                        'error': 'Empty response', 'structured': None}
 
-            structured = json.loads(raw_response)
-            return {
-                'success': True,
-                'method': 'ollama-text',
-                'model': model,
-                'structured': structured
-            }
+            return {'success': True, 'method': model, 'structured': structured}
 
     except urllib.error.URLError as e:
-        return {
-            'success': False,
-            'method': 'ollama-text',
-            'error': f'Ollama not reachable at {OLLAMA_URL}: {e}',
-            'structured': None
-        }
-    except json.JSONDecodeError as e:
-        return {
-            'success': False,
-            'method': 'ollama-text',
-            'error': f'LLM returned invalid JSON: {e}',
-            'raw_response': raw_response if 'raw_response' in dir() else '',
-            'structured': None
-        }
+        return {'success': False, 'method': model,
+                'error': f'Ollama not reachable: {e}', 'structured': None}
     except Exception as e:
-        return {
-            'success': False,
-            'method': 'ollama-text',
-            'error': str(e),
-            'structured': None
-        }
+        return {'success': False, 'method': model,
+                'error': str(e), 'structured': None}
 
-if __name__ == '__main__':
+def main():
     if len(sys.argv) < 2:
         print(json.dumps({'success': False, 'error': 'Usage: parse-ollama.py <ocr_json_file>'}))
         sys.exit(1)
@@ -106,12 +78,19 @@ if __name__ == '__main__':
     with open(sys.argv[1]) as f:
         ocr_data = json.load(f)
 
-    model = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL
     text = ocr_data.get('text', '')
-
     if not text.strip():
         print(json.dumps({'success': False, 'error': 'No text in OCR output'}))
         sys.exit(1)
 
+    # Try primary model first, fall back to llama3.2:1b
+    model = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL
     result = parse_with_ollama(text, model)
+
+    if not result.get('success') and model != FALLBACK_MODEL:
+        result = parse_with_ollama(text, FALLBACK_MODEL)
+
     print(json.dumps(result, indent=2))
+
+if __name__ == '__main__':
+    main()
