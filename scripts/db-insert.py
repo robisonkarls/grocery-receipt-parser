@@ -10,6 +10,7 @@ import sqlite3
 import os
 from pathlib import Path
 import uuid
+import hashlib
 
 def resolve_data_dir():
     """Resolve the data directory from env, config, or default."""
@@ -31,6 +32,20 @@ def resolve_data_dir():
 DATA_DIR = resolve_data_dir()
 DB_PATH = DATA_DIR / 'db' / 'groceries.db'
 
+def compute_file_hash(path):
+    """Return sha256 hex digest of a file, or None if path is empty/missing."""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def insert_receipt(data, receipt_id, image_path):
     """Insert receipt and items into database."""
     structured = data.get('structured', {})
@@ -39,13 +54,45 @@ def insert_receipt(data, receipt_id, image_path):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
+    # Dedup check 1: source file hash (same file submitted twice)
+    source_hash = compute_file_hash(image_path)
+    if source_hash:
+        cursor.execute("SELECT id FROM receipts WHERE source_file_hash = ?", (source_hash,))
+        existing = cursor.fetchone()
+        if existing:
+            conn.close()
+            print(json.dumps({
+                'success': False,
+                'duplicate': True,
+                'duplicate_reason': 'source_file_hash',
+                'existing_id': existing[0],
+                'error': f'Receipt already in database (id={existing[0]})'
+            }))
+            sys.exit(0)
+
+    # Dedup check 2: transaction_id (same receipt from different file/scan)
+    transaction_id = structured.get('transaction_id', '').strip()
+    if transaction_id:
+        cursor.execute("SELECT id FROM receipts WHERE transaction_id = ?", (transaction_id,))
+        existing = cursor.fetchone()
+        if existing:
+            conn.close()
+            print(json.dumps({
+                'success': False,
+                'duplicate': True,
+                'duplicate_reason': 'transaction_id',
+                'existing_id': existing[0],
+                'error': f'Receipt with transaction_id={transaction_id} already in database (id={existing[0]})'
+            }))
+            sys.exit(0)
+
     try:
         cursor.execute("""
             INSERT INTO receipts (
                 id, store_name, store_location, receipt_date, receipt_time,
                 total_amount, tax_amount, subtotal, payment_method, transaction_id,
-                markdown_path, image_path, ocr_method, ocr_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                markdown_path, image_path, ocr_method, ocr_confidence, source_file_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             receipt_id,
             structured.get('store') or 'Unknown',
@@ -56,11 +103,12 @@ def insert_receipt(data, receipt_id, image_path):
             structured.get('tax', 0.0),
             structured.get('subtotal', 0.0),
             structured.get('payment_method', ''),
-            structured.get('transaction_id', ''),
+            transaction_id,
             f"receipts/{receipt_id}.md",
             image_path,
             data.get('method', 'unknown'),
-            data.get('confidence', 0.0)
+            data.get('confidence', 0.0),
+            source_hash
         ))
 
         items = structured.get('items', [])
